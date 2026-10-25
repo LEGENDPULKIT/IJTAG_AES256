@@ -80,12 +80,6 @@ module tb_ijtag_aes_top;
         end
     endtask
 
-    task automatic cycle(input reg tm, input reg ti);
-        begin
-            drive_cycle(tm, ti);
-        end
-    endtask
-
     task automatic reset_environment;
         begin
             @(negedge tck);
@@ -105,23 +99,23 @@ module tb_ijtag_aes_top;
             @(negedge tck);
             trst_n = 1'b1;
             reset_n = 1'b1;
-            cycle(1'b0, 1'b0);
+            drive_cycle(1'b0, 1'b0);
         end
     endtask
 
     task automatic load_instruction(input [3:0] instr);
         integer b;
         begin
-            cycle(1,0); // Select-DR
-            cycle(1,0); // Select-IR
-            cycle(0,0); // Capture-IR
-            cycle(0,0); // Shift-IR
+            drive_cycle(1,0); // Select-DR
+            drive_cycle(1,0); // Select-IR
+            drive_cycle(0,0); // Capture-IR
+            drive_cycle(0,0); // Shift-IR
 
             for (b = 0; b < 4; b = b + 1)
-                cycle((b == 3), instr[b]);
+                drive_cycle((b == 3), instr[b]);
 
-            cycle(1,0); // Update-IR
-            cycle(0,0); // Run-Test/Idle
+            drive_cycle(1,0); // Update-IR
+            drive_cycle(0,0); // Run-Test/Idle
 
             check(
                 dut.u_jtag_tap.instruction === instr,
@@ -132,11 +126,11 @@ module tb_ijtag_aes_top;
 
     task automatic enter_shift_dr;
         begin
-            repeat (5) cycle(1'b1, 1'b0);
-            cycle(1'b0, 1'b0); // Run-Test/Idle
-            cycle(1'b1, 1'b0); // Select-DR
-            cycle(1'b0, 1'b0); // Capture-DR
-            cycle(1'b0, 1'b0); // Shift-DR
+            repeat (5) drive_cycle(1'b1, 1'b0);
+            drive_cycle(1'b0, 1'b0); // Run-Test/Idle
+            drive_cycle(1'b1, 1'b0); // Select-DR
+            drive_cycle(1'b0, 1'b0); // Capture-DR
+            drive_cycle(1'b0, 1'b0); // Shift-DR
 
             if (dut.u_jtag_tap.state !== TAP_SHIFT_DR)
                 $fatal(1, "[SEQUENCE] TAP failed to enter Shift-DR");
@@ -145,9 +139,9 @@ module tb_ijtag_aes_top;
 
     task automatic exit_update_dr;
         begin
-            cycle(1'b1, 1'b0); // Exit1-DR
-            cycle(1'b1, 1'b0); // Update-DR
-            cycle(1'b0, 1'b0); // Run-Test/Idle
+            drive_cycle(1'b1, 1'b0); // Exit1-DR
+            drive_cycle(1'b1, 1'b0); // Update-DR
+            drive_cycle(1'b0, 1'b0); // Run-Test/Idle
         end
     endtask
 
@@ -156,7 +150,7 @@ module tb_ijtag_aes_top;
             if (sib1_enable !== 1'b1) begin
                 $display("[SEQUENCE] Opening SIB1...");
                 enter_shift_dr();
-                cycle(1'b1, 1'b1);
+                drive_cycle(1'b1, 1'b1);
                 exit_update_dr();
             end
 
@@ -166,8 +160,8 @@ module tb_ijtag_aes_top;
             if (sib2_enable !== 1'b1) begin
                 $display("[SEQUENCE] Opening SIB2...");
                 enter_shift_dr();
-                cycle(1'b0, 1'b1);
-                cycle(1'b1, 1'b1);
+                drive_cycle(1'b0, 1'b1);
+                drive_cycle(1'b1, 1'b1);
                 exit_update_dr();
             end
 
@@ -177,9 +171,9 @@ module tb_ijtag_aes_top;
             if (sib3_enable !== 1'b1) begin
                 $display("[SEQUENCE] Opening SIB3...");
                 enter_shift_dr();
-                cycle(1'b0, 1'b1);
-                cycle(1'b0, 1'b1);
-                cycle(1'b1, 1'b1);
+                drive_cycle(1'b0, 1'b1);
+                drive_cycle(1'b0, 1'b1);
+                drive_cycle(1'b1, 1'b1);
                 exit_update_dr();
             end
 
@@ -187,6 +181,52 @@ module tb_ijtag_aes_top;
                 {sib1_enable,sib2_enable,sib3_enable} === 3'b111,
                 "All three SIBs open"
             );
+        end
+    endtask
+
+    // Check that a closed SIB3 keeps the AES instrument out of the scan path.
+    task automatic test_sib3_bypass;
+        integer b;
+        begin
+            $display("\n[TEST 0] CLOSED SIB3 BYPASS / AES ISOLATION");
+
+            reset_environment();
+            load_instruction(IJTAG_INSTR);
+
+            // Open SIB1 and SIB2, leaving SIB3 (the AES instrument segment) closed.
+            enter_shift_dr();
+            drive_cycle(1'b1, 1'b1);
+            exit_update_dr();
+
+            enter_shift_dr();
+            drive_cycle(1'b0, 1'b1);
+            drive_cycle(1'b1, 1'b1);
+            exit_update_dr();
+
+            check(
+                {sib1_enable,sib2_enable,sib3_enable} === 3'b110,
+                "SIB3 stays closed for bypass test"
+            );
+
+            enter_shift_dr();
+
+            // A closed SIB should return its own shifted control bit on TDO.
+            drive_cycle(1'b0, 1'b1);
+            check(tdo === 1'b1, "Closed SIB3 returns its shifted bit");
+
+            // Continue shifting while SIB3 is closed. The AES wrapper should
+            // remain isolated, so its scan counter should stay at zero.
+            for (b = 1; b < 8; b = b + 1)
+                drive_cycle(1'b0, 1'b0);
+
+            check(
+                dut.u_aes_ijtag_wrapper.shift_count === 9'd0,
+                "Closed SIB blocks AES scan"
+            );
+            check(aes_busy === 1'b0, "AES remains idle during SIB bypass");
+
+            // Reset leaves the normal AES tests with a clean starting state.
+            reset_environment();
         end
     endtask
 
@@ -204,8 +244,8 @@ module tb_ijtag_aes_top;
                 #1;
             end
 
-            cycle(1'b1, 1'b0); // Exit1-DR -> Update-DR
-            cycle(1'b0, 1'b0); // Update-DR -> Run-Test/Idle
+            drive_cycle(1'b1, 1'b0); // Exit1-DR -> Update-DR
+            drive_cycle(1'b0, 1'b0); // Update-DR -> Run-Test/Idle
         end
     endtask
 
@@ -213,20 +253,20 @@ module tb_ijtag_aes_top;
         begin
             case (dut.u_jtag_tap.state)
                 4'd4: begin end // Already Shift-DR
-                4'd3: cycle(1'b0, 1'b0); // Capture-DR -> Shift-DR
+                4'd3: drive_cycle(1'b0, 1'b0); // Capture-DR -> Shift-DR
                 4'd6: begin
-                    cycle(1'b1, 1'b0); // Pause-DR -> Exit2-DR
-                    cycle(1'b0, 1'b0); // Exit2-DR -> Shift-DR
+                    drive_cycle(1'b1, 1'b0); // Pause-DR -> Exit2-DR
+                    drive_cycle(1'b0, 1'b0); // Exit2-DR -> Shift-DR
                 end
-                4'd7: cycle(1'b0, 1'b0); // Exit2-DR -> Shift-DR
+                4'd7: drive_cycle(1'b0, 1'b0); // Exit2-DR -> Shift-DR
                 4'd1: begin
-                    cycle(1'b1, 1'b0); // Idle -> Select-DR
-                    cycle(1'b0, 1'b0); // Select-DR -> Capture-DR
-                    cycle(1'b0, 1'b0); // Capture-DR -> Shift-DR
+                    drive_cycle(1'b1, 1'b0); // Idle -> Select-DR
+                    drive_cycle(1'b0, 1'b0); // Select-DR -> Capture-DR
+                    drive_cycle(1'b0, 1'b0); // Capture-DR -> Shift-DR
                 end
                 4'd2: begin
-                    cycle(1'b0, 1'b0); // Select-DR -> Capture-DR
-                    cycle(1'b0, 1'b0); // Capture-DR -> Shift-DR
+                    drive_cycle(1'b0, 1'b0); // Select-DR -> Capture-DR
+                    drive_cycle(1'b0, 1'b0); // Capture-DR -> Shift-DR
                 end
                 default: begin
                     $display("[SEQUENCE] Unsupported TAP state=%0d",
@@ -298,8 +338,8 @@ module tb_ijtag_aes_top;
                 #1;
             end
 
-            cycle(1'b1, 1'b0); // Exit1-DR -> Update-DR
-            cycle(1'b0, 1'b0); // Update-DR -> Run-Test/Idle
+            drive_cycle(1'b1, 1'b0); // Exit1-DR -> Update-DR
+            drive_cycle(1'b0, 1'b0); // Update-DR -> Run-Test/Idle
         end
     endtask
 
@@ -371,6 +411,8 @@ module tb_ijtag_aes_top;
         $display(" IJTAG + AES-256 ENCRYPTION AND DECRYPTION TEST");
         $display("====================================================");
 
+        test_sib3_bypass();
+
         // First transaction: encryption.
         $display("\n[TEST 1] AES-256 ENCRYPTION");
         run_transaction(
@@ -401,6 +443,29 @@ module tb_ijtag_aes_top;
             recovered_plaintext === expected_plaintext,
             "AES-256 decryption recovers original plaintext"
         );
+
+        // Randomized round-trip trials. The key remains fixed so each trial
+        // exercises randomized data through the existing IJTAG/AES path.
+        // The fixed known-answer tests above independently check correctness.
+        $display("\n[TEST 3] RANDOMIZED AES-256 ROUND-TRIP TESTS");
+        for (bit_index = 0; bit_index < 10; bit_index = bit_index + 1) begin
+            expected_plaintext = {
+                $urandom, $urandom, $urandom, $urandom
+            };
+
+            $display("[RANDOM] Trial %0d plaintext: %032h",
+                     bit_index + 1, expected_plaintext);
+
+            run_transaction(1'b0, expected_plaintext, ciphertext);
+            run_transaction(1'b1, ciphertext, recovered_plaintext);
+
+            $display("[RANDOM] Trial %0d recovered:  %032h",
+                     bit_index + 1, recovered_plaintext);
+            check(
+                recovered_plaintext === expected_plaintext,
+                "Randomized AES-256 encrypt/decrypt round trip"
+            );
+        end
 
         $display("");
         $display("================ TEST SUMMARY ================");

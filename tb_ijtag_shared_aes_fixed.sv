@@ -112,17 +112,22 @@ module tb_ijtag_shared_aes;
             #1;
 
             if ((dut.selected_sib !== expected_sib) ||
-                (dut.instrument_enable !== expected_enable)) begin
+                (dut.instrument_enable !== expected_enable) ||
+                (sib1_enable !== cfg[0]) ||
+                (sib2_enable !== cfg[1]) ||
+                (sib3_enable !== cfg[2])) begin
                 $display(
-                    "[FAIL] Config=%03b selected=%0d enable=%b",
-                    cfg, dut.selected_sib, dut.instrument_enable
+                    "[FAIL] Config=%03b selected=%0d AES_enable=%b SIBs=%b%b%b",
+                    cfg, dut.selected_sib, dut.instrument_enable,
+                    sib3_enable, sib2_enable, sib1_enable
                 );
                 failures = failures + 1;
             end
             else begin
                 $display(
-                    "[PASS] Config=%03b selected=%0d enable=%b",
-                    cfg, dut.selected_sib, dut.instrument_enable
+                    "[PASS] Config=%03b SIBs=%b%b%b AES_enable=%b selected=%0d",
+                    cfg, sib3_enable, sib2_enable, sib1_enable,
+                    dut.instrument_enable, dut.selected_sib
                 );
             end
         end
@@ -141,14 +146,17 @@ module tb_ijtag_shared_aes;
         tap_cycle(1'b0, 1'b0);
         tap_cycle(1'b0, 1'b0);
 
-        // Verify each valid one-hot selection.
+        // Verify all eight independent SIB open/bypass combinations.
+        // Bit order is {SIB3,SIB2,SIB1}; 1=open, 0=bypass.
+        // Any nonzero configuration can reach the one shared AES instrument.
+        check_sib_selection(3'b000, 2'd0, 1'b0);
         check_sib_selection(3'b001, 2'd1, 1'b1);
         check_sib_selection(3'b010, 2'd2, 1'b1);
+        check_sib_selection(3'b011, 2'd0, 1'b1);
         check_sib_selection(3'b100, 2'd3, 1'b1);
-
-        // Invalid multi-hot and zero-hot settings must not select AES.
-        check_sib_selection(3'b000, 2'd0, 1'b0);
-        check_sib_selection(3'b011, 2'd0, 1'b0);
+        check_sib_selection(3'b101, 2'd0, 1'b1);
+        check_sib_selection(3'b110, 2'd0, 1'b1);
+        check_sib_selection(3'b111, 2'd0, 1'b1);
 
         // Select SIB2 for the AES scan attempt.
         load_instruction(4'b0011);
@@ -198,11 +206,6 @@ module tb_ijtag_shared_aes;
 
         if (aes_done === 1'b1) begin
             $display("[INFO] AES wrapper completed.");
-            // Diagnostic checkpoints: distinguish AES/data-loading errors
-            // from TDO capture/shift errors.
-            $display("[DEBUG] Loaded key      : %064h", dut.u_shared_aes_instrument.key_reg);
-            $display("[DEBUG] Loaded plaintext: %032h", dut.u_shared_aes_instrument.block_reg);
-            $display("[DEBUG] Wrapper result  : %032h", dut.u_shared_aes_instrument.result_reg);
 
             // Capture the wrapper's result register, then shift 128 bits out.
             // TDO is sampled before each active TCK edge so we read the
@@ -238,7 +241,7 @@ module tb_ijtag_shared_aes;
 
         $display("----------------------------------------------");
         if (failures == 0)
-            $display("RESULT: ALL SELECTOR AND AES SCAN TESTS PASSED");
+            $display("RESULT: ALL 8 SIB CONFIGURATIONS AND AES SCAN TESTS PASSED");
         else
             $display("RESULT: %0d TEST(S) FAILED", failures);
         $display("----------------------------------------------");

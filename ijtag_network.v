@@ -1,85 +1,56 @@
-
 `timescale 1ns / 1ps
-
+// Shared-AES access selector prototype.
+// Configuration is one-hot: 001 selects SIB1, 010 selects SIB2,
+// 100 selects SIB3. 000 and multi-hot values fail safe to bypass.
+// Because the AES instrument is shared, this is a muxed access topology,
+// not three copies of AES and not a claim of IEEE 1687 compliance.
 module ijtag_network (
-    input  wire tck,
-    input  wire trst_n,
-    input  wire tdi,
-    input  wire select_ijtag,
-    input  wire capture_dr,
-    input  wire shift_dr,
-    input  wire update_dr,
-    output wire instrument_tdi,
-    input  wire instrument_tdo,
-    output wire sib1_enable,
-    output wire sib2_enable,
-    output wire sib3_enable,
-    output wire ijtag_tdo
+    input  wire       tck,
+    input  wire       trst_n,
+    input  wire       tdi,
+    input  wire       select_ijtag,
+    input  wire       capture_dr,
+    input  wire       shift_dr,
+    input  wire       update_dr,
+    input  wire       sib1_config_enable,
+    input  wire       sib2_config_enable,
+    input  wire       sib3_config_enable,
+    output wire       instrument_tdi,
+    input  wire       instrument_tdo,
+    output wire       sib1_enable,
+    output wire       sib2_enable,
+    output wire       sib3_enable,
+    output wire       instrument_enable,
+    output wire [1:0] selected_sib,
+    output wire       ijtag_tdo
 );
+    wire scan_capture = capture_dr & select_ijtag;
+    wire scan_shift   = shift_dr & select_ijtag;
+    wire [2:0] cfg = {sib3_config_enable, sib2_config_enable, sib1_config_enable};
+    reg [2:0] bypass_shift;
+    wire one_hot = (cfg == 3'b001) || (cfg == 3'b010) || (cfg == 3'b100);
 
-    wire cap1, cap2, cap3;
-    wire sh1, sh2, sh3;
-    wire up1, up2, up3;
-    wire tdi2, tdi3;
-    wire tdo1, tdo2, tdo3;
+    assign instrument_enable = one_hot;
+    assign selected_sib = (cfg == 3'b001) ? 2'd1 :
+                          (cfg == 3'b010) ? 2'd2 :
+                          (cfg == 3'b100) ? 2'd3 : 2'd0;
+    assign sib1_enable = (cfg == 3'b001);
+    assign sib2_enable = (cfg == 3'b010);
+    assign sib3_enable = (cfg == 3'b100);
 
-    assign cap1 = capture_dr & select_ijtag;
-    assign sh1  = shift_dr   & select_ijtag;
-    assign up1  = update_dr  & select_ijtag;
+    // In this shared-instrument topology, the selected SIB aliases the one
+    // AES instrument directly. Invalid/zero-hot configuration uses a 3-bit
+    // serial bypass chain so the network remains scannable without AES access.
+    assign instrument_tdi = instrument_enable ? tdi : 1'b0;
+    assign ijtag_tdo = instrument_enable ? instrument_tdo : bypass_shift[0];
 
-    assign cap2 = cap1 & sib1_enable;
-    assign sh2  = sh1  & sib1_enable;
-    assign up2  = up1  & sib1_enable;
-
-    assign cap3 = cap2 & sib2_enable;
-    assign sh3  = sh2  & sib2_enable;
-    assign up3  = up2  & sib2_enable;
-
-    ijtag_sib sib1 (
-        .tck(tck),
-        .trst_n(trst_n),
-        .tdi(tdi),
-        .capture_dr(cap1),
-        .shift_dr(sh1),
-        .update_dr(up1),
-        .segment_tdi(tdi2),
-        .segment_tdo(tdo2),
-        .segment_enable(sib1_enable),
-        .tdo(tdo1)
-    );
-
-    ijtag_sib sib2 (
-        .tck(tck),
-        .trst_n(trst_n),
-        .tdi(tdi2),
-        .capture_dr(cap2),
-        .shift_dr(sh2),
-        .update_dr(up2),
-        .segment_tdi(tdi3),
-        .segment_tdo(tdo3),
-        .segment_enable(sib2_enable),
-        .tdo(tdo2)
-    );
-
-    ijtag_sib sib3 (
-        .tck(tck),
-        .trst_n(trst_n),
-        .tdi(tdi3),
-        .capture_dr(cap3),
-        .shift_dr(sh3),
-        .update_dr(up3),
-        .segment_tdi(instrument_tdi),
-        .segment_tdo(instrument_tdo),
-        .segment_enable(sib3_enable),
-        .tdo(tdo3)
-    );
-
-    // Diagnostic workaround for the observed TDO cascade failure.
-    // When all SIBs are open, route the instrument TDO directly.
-    // Otherwise, retain the normal outer SIB output.
-    assign ijtag_tdo =
-        (select_ijtag && sib1_enable && sib2_enable && sib3_enable)
-        ? instrument_tdo
-        : tdo1;
-
+    always @(posedge tck or negedge trst_n) begin
+        if (!trst_n) begin
+            bypass_shift <= 3'b000;
+        end else if (scan_capture) begin
+            bypass_shift <= 3'b000;
+        end else if (scan_shift && !instrument_enable) begin
+            bypass_shift <= {tdi, bypass_shift[2:1]};
+        end
+    end
 endmodule

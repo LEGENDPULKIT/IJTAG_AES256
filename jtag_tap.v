@@ -17,12 +17,14 @@ module jtag_tap #(
     output wire        select_idcode,
     output wire        select_ijtag,
     output wire        select_bypass,
+    output wire        select_sib_config,
 
     output wire        capture_dr,
     output wire        shift_dr,
     output wire        update_dr,
 
-    input  wire        ijtag_tdo
+    input  wire        ijtag_tdo,
+    input  wire        config_tdo
 );
 
 // --------------------------------------------------
@@ -52,6 +54,7 @@ localparam UPDATE_IR        = 4'd15;
 localparam IDCODE_INSTR = 4'b0001;
 localparam IJTAG_INSTR  = 4'b0010;
 localparam BYPASS_INSTR = 4'b1111;
+localparam SIB_CONFIG_INSTR = 4'b0011;
 
 // --------------------------------------------------
 // REGISTERS
@@ -78,6 +81,7 @@ assign instruction   = ir_reg;
 assign select_idcode = (ir_reg == IDCODE_INSTR);
 assign select_ijtag  = (ir_reg == IJTAG_INSTR);
 assign select_bypass = (ir_reg == BYPASS_INSTR);
+assign select_sib_config = (ir_reg == SIB_CONFIG_INSTR);
 
 assign capture_dr = (state == CAPTURE_DR);
 assign shift_dr   = (state == SHIFT_DR);
@@ -203,7 +207,8 @@ always @(posedge tck or negedge trst_n) begin
         else if (state == SHIFT_DR &&
                  !select_idcode &&
                  !select_bypass &&
-                 !select_ijtag)
+                 !select_ijtag &&
+                 !select_sib_config)
             dr_shift <= {tdi, dr_shift[7:1]};
 
         if (state == UPDATE_DR)
@@ -221,7 +226,9 @@ always @(*) begin
         tdo = ir_shift[0];
 
     else if (state == SHIFT_DR) begin
-        if (select_ijtag)
+        if (select_sib_config)
+            tdo = config_tdo;
+        else if (select_ijtag)
             tdo = ijtag_tdo;
         else if (select_idcode)
             tdo = idcode_shift[0];

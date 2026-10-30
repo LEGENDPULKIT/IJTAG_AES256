@@ -1,9 +1,8 @@
 `timescale 1ns / 1ps
 
-// Layered plain-SystemVerilog testbench for IJTAG + AES-256.
-// Tests encryption first, then decryption after a DUT reset.
-// Assumes the top module is ijtag_aes_top and has decrypt_mode input.
-// Assumes the wrapper's scan payload is {256-bit key, 128-bit input block}.
+// Layered SystemVerilog testbench for the shared-AES IJTAG design.
+// The 3-bit configuration register selects one shared AES instrument.
+// AES wrapper in this design supports encryption only.
 
 module tb_ijtag_aes_top;
 
@@ -16,16 +15,29 @@ module tb_ijtag_aes_top;
 
     integer errors, checks, timeout_count;
     integer bit_index;
+
+    reg [2:0] sib_config;
     reg [383:0] payload;
     reg [127:0] ciphertext;
-    reg [127:0] recovered_plaintext;
-    reg [127:0] expected_ciphertext;
-    reg [127:0] expected_plaintext;
+    reg [127:0] random_plaintext;
+    reg [127:0] repeat_ciphertext;
+    reg [127:0] observed_config;
 
     localparam [3:0] IJTAG_INSTR = 4'b0010;
+    localparam [3:0] SIB_CONFIG_INSTR = 4'b0011;
     localparam [3:0] TAP_SHIFT_DR = 4'd4;
-    localparam integer AES_TIMEOUT_CYCLES = 2000;
 
+// definig the AES key, plaintext and expected ciphertext for the known-answer test to load it later on
+    localparam [255:0] AES_KEY =
+        256'h603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4;
+    localparam [127:0] AES_PLAINTEXT =
+        128'h6bc1bee22e409f96e93d7e117393172a;
+    localparam [127:0] AES_EXPECTED_CIPHERTEXT =
+        128'hf3eed1bdb5d2a03c064b5a7e3db181f8;
+
+    localparam integer AES_TIMEOUT_CYCLES = 20000;
+
+    // Keep the DUT instance and its top-level signal connections unchanged.
     ijtag_aes_top dut (
         .tck(tck),
         .clk(clk),
@@ -48,12 +60,13 @@ module tb_ijtag_aes_top;
         tck = 1'b0;
     end
 
-    // Keep the clocks in phase, matching the original testbench.
+    // Keep the two clocks in phase, as in the existing bench.
     always #5 begin
         clk = ~clk;
         tck = ~tck;
     end
 
+//the function acts like a counter that can be displayed in the scoreboard 
     task automatic check(
         input reg condition,
         input [255:0] label_text
@@ -92,30 +105,31 @@ module tb_ijtag_aes_top;
             #1;
 
             check(
-                {sib1_enable,sib2_enable,sib3_enable} === 3'b000,
-                "Reset closes all SIBs"
+                {sib3_enable,sib2_enable,sib1_enable} === 3'b000,
+                "Reset clears the SIB configuration"
             );
 
             @(negedge tck);
             trst_n = 1'b1;
             reset_n = 1'b1;
-            drive_cycle(1'b0, 1'b0);
+            drive_cycle(1'b0, 1'b0); //changes the state to Run-Test/Idle
         end
     endtask
 
     task automatic load_instruction(input [3:0] instr);
         integer b;
         begin
-            drive_cycle(1,0); // Select-DR
-            drive_cycle(1,0); // Select-IR
-            drive_cycle(0,0); // Capture-IR
-            drive_cycle(0,0); // Shift-IR
+            drive_cycle(1'b1, 1'b0); // Select-DR
+            drive_cycle(1'b1, 1'b0); // Select-IR
+            drive_cycle(1'b0, 1'b0); // Capture-IR
+            drive_cycle(1'b0, 1'b0); // Shift-IR
 
             for (b = 0; b < 4; b = b + 1)
-                drive_cycle((b == 3), instr[b]);
+                drive_cycle((b == 3), instr[b]); // it runs 4 times, last time tms=1 to exit Shift-IR, so at evry iteration, 
+                                                 //tms=0 except the last one, and tdi=instr[b] to shift in the instruction bits
 
-            drive_cycle(1,0); // Update-IR
-            drive_cycle(0,0); // Run-Test/Idle
+            drive_cycle(1'b1, 1'b0); // Exit1-IR -> Update-IR
+            drive_cycle(1'b0, 1'b0); // Update-IR -> Run-Test/Idle
 
             check(
                 dut.u_jtag_tap.instruction === instr,
@@ -126,6 +140,7 @@ module tb_ijtag_aes_top;
 
     task automatic enter_shift_dr;
         begin
+            // Five TMS-high clocks put the TAP in Test-Logic-Reset.
             repeat (5) drive_cycle(1'b1, 1'b0);
             drive_cycle(1'b0, 1'b0); // Run-Test/Idle
             drive_cycle(1'b1, 1'b0); // Select-DR
@@ -139,93 +154,90 @@ module tb_ijtag_aes_top;
 
     task automatic exit_update_dr;
         begin
-            drive_cycle(1'b1, 1'b0); // Exit1-DR
-            drive_cycle(1'b1, 1'b0); // Update-DR
-            drive_cycle(1'b0, 1'b0); // Run-Test/Idle
+            // The last shifted bit already moved the TAP into Exit1-DR.
+            drive_cycle(1'b1, 1'b0); // Exit1-DR -> Update-DR
+            drive_cycle(1'b0, 1'b0); // Update-DR -> Run-Test/Idle
         end
     endtask
 
-    task automatic open_all_sibs;
-        begin
-            if (sib1_enable !== 1'b1) begin
-                $display("[SEQUENCE] Opening SIB1...");
-                enter_shift_dr();
-                drive_cycle(1'b1, 1'b1);
-                exit_update_dr();
-            end
-
-            if (sib1_enable !== 1'b1)
-                $fatal(1, "[SEQUENCE] SIB1 failed to open");
-
-            if (sib2_enable !== 1'b1) begin
-                $display("[SEQUENCE] Opening SIB2...");
-                enter_shift_dr();
-                drive_cycle(1'b0, 1'b1);
-                drive_cycle(1'b1, 1'b1);
-                exit_update_dr();
-            end
-
-            if ({sib1_enable,sib2_enable} !== 2'b11)
-                $fatal(1, "[SEQUENCE] SIB2 failed to open");
-
-            if (sib3_enable !== 1'b1) begin
-                $display("[SEQUENCE] Opening SIB3...");
-                enter_shift_dr();
-                drive_cycle(1'b0, 1'b1);
-                drive_cycle(1'b0, 1'b1);
-                drive_cycle(1'b1, 1'b1);
-                exit_update_dr();
-            end
-
-            check(
-                {sib1_enable,sib2_enable,sib3_enable} === 3'b111,
-                "All three SIBs open"
-            );
-        end
-    endtask
-
-    // Check that a closed SIB3 keeps the AES instrument out of the scan path.
-    task automatic test_sib3_bypass;
+    // Program the new 3-bit configuration register using instruction 0011.
+    // Bits are shifted least-significant bit first, then committed in Update-DR.
+    task automatic program_sib_config(input [2:0] cfg);
         integer b;
         begin
-            $display("\n[TEST 0] CLOSED SIB3 BYPASS / AES ISOLATION");
+            load_instruction(SIB_CONFIG_INSTR);
+            enter_shift_dr();
 
-            reset_environment();
+            for (b = 0; b < 3; b = b + 1)
+                drive_cycle((b == 2), cfg[b]);
+
+            exit_update_dr();
+
+            check(
+                {sib3_enable,sib2_enable,sib1_enable} === cfg,
+                "SIB configuration register updated"
+            );
+
             load_instruction(IJTAG_INSTR);
+            check(select_ijtag === 1'b1, "IJTAG instruction selected");
+        end
+    endtask
 
-            // Open SIB1 and SIB2, leaving SIB3 (the AES instrument segment) closed.
-            enter_shift_dr();
-            drive_cycle(1'b1, 1'b1);
-            exit_update_dr();
-
-            enter_shift_dr();
-            drive_cycle(1'b0, 1'b1);
-            drive_cycle(1'b1, 1'b1);
-            exit_update_dr();
-
-            check(
-                {sib1_enable,sib2_enable,sib3_enable} === 3'b110,
-                "SIB3 stays closed for bypass test"
-            );
-
-            enter_shift_dr();
-
-            // A closed SIB should return its own shifted control bit on TDO.
-            drive_cycle(1'b0, 1'b1);
-            check(tdo === 1'b1, "Closed SIB3 returns its shifted bit");
-
-            // Continue shifting while SIB3 is closed. The AES wrapper should
-            // remain isolated, so its scan counter should stay at zero.
-            for (b = 1; b < 8; b = b + 1)
-                drive_cycle(1'b0, 1'b0);
+    task automatic check_configuration(
+        input [2:0] cfg,
+        input [1:0] expected_selection,
+        input reg expected_enable
+    );
+        begin
+            $display("[CONFIG] Request=%03b", cfg);
+            program_sib_config(cfg);
 
             check(
-                dut.u_aes_ijtag_wrapper.shift_count === 9'd0,
-                "Closed SIB blocks AES scan"
+                dut.selected_sib === expected_selection,
+                "Configuration selects the expected SIB"
             );
-            check(aes_busy === 1'b0, "AES remains idle during SIB bypass");
+            check(
+                dut.instrument_enable === expected_enable,
+                "Instrument enable matches whether any SIB is open"
+            );
+        end
+    endtask
 
-            // Reset leaves the normal AES tests with a clean starting state.
+    // With all SIBs closed, IJTAG scan data must use the three-bit bypass
+    // register and must not clock the shared AES scan register.
+    task automatic test_zero_config_bypass;
+        integer b;
+        begin
+            $display("\n[TEST 1] ZERO CONFIGURATION BYPASS / AES ISOLATION");
+            reset_environment();
+            program_sib_config(3'b000);
+
+            check(dut.selected_sib === 2'd0,
+                  "Zero configuration selects no SIB");
+            check(dut.instrument_enable === 1'b0,
+                  "Zero configuration disables AES access");
+
+            enter_shift_dr();
+
+            // Three-bit bypass chain: after shifting 1,0,0, the first bit
+            // emerges at TDO.
+            drive_cycle(1'b0, 1'b1);
+            drive_cycle(1'b0, 1'b0);
+            drive_cycle(1'b0, 1'b0);
+            check(tdo === 1'b1, "Zero configuration shifts through bypass");
+
+            for (b = 0; b < 8; b = b + 1)
+                drive_cycle(1'b0, b[0]);
+
+            check(
+                dut.u_shared_aes_instrument.shift_count === 9'd0,
+                "Zero configuration blocks AES scan clocks"
+            );
+            check(aes_busy === 1'b0,
+                  "AES remains idle when all SIBs are closed");
+            check(aes_done === 1'b0,
+                  "AES does not complete when all SIBs are closed");
+
             reset_environment();
         end
     endtask
@@ -233,7 +245,7 @@ module tb_ijtag_aes_top;
     task automatic load_aes_payload(input [383:0] data);
         integer b;
         begin
-            $display("[SEQUENCE] Shifting 384-bit payload...");
+            $display("[SEQUENCE] Shifting 384-bit AES payload...");
             enter_shift_dr();
 
             for (b = 0; b < 384; b = b + 1) begin
@@ -244,8 +256,7 @@ module tb_ijtag_aes_top;
                 #1;
             end
 
-            drive_cycle(1'b1, 1'b0); // Exit1-DR -> Update-DR
-            drive_cycle(1'b0, 1'b0); // Update-DR -> Run-Test/Idle
+            exit_update_dr();
         end
     endtask
 
@@ -279,16 +290,15 @@ module tb_ijtag_aes_top;
             if (dut.u_jtag_tap.state !== TAP_SHIFT_DR)
                 $fatal(1, "[SEQUENCE] TAP did not reach Shift-DR");
 
-            if ({sib1_enable,sib2_enable,sib3_enable} !== 3'b111)
-                $fatal(1, "[SEQUENCE] SIB path is not fully open");
+            if (dut.instrument_enable !== 1'b1)
+                $fatal(1, "[SEQUENCE] Shared AES instrument is not selected");
         end
     endtask
 
     task automatic report_aes_status;
         begin
-            $display("[MONITOR] busy=%b done=%b wrapper_state=%0d mode=%b",
-                     aes_busy, aes_done, dut.u_aes_ijtag_wrapper.state,
-                     decrypt_mode);
+            $display("[MONITOR] busy=%b done=%b wrapper_state=%0d",
+                     aes_busy, aes_done, dut.u_shared_aes_instrument.state);
         end
     endtask
 
@@ -301,7 +311,7 @@ module tb_ijtag_aes_top;
                 @(posedge clk);
                 #1;
                 timeout_count = timeout_count + 1;
-                if ((timeout_count % 200) == 0)
+                if ((timeout_count % 1000) == 0)
                     report_aes_status();
             end
 
@@ -319,15 +329,12 @@ module tb_ijtag_aes_top;
         begin
             result = 128'b0;
 
-            if ({sib1_enable,sib2_enable,sib3_enable} !== 3'b111)
-                open_all_sibs();
-
             enter_shift_dr_safely();
 
-            $display("[MONITOR] Wrapper result=%032h",
-                     dut.u_aes_ijtag_wrapper.result_reg);
+            $display("[MONITOR] Shared AES result=%032h",
+                     dut.u_shared_aes_instrument.result_reg);
 
-            // Sample TDO before each active shift edge, LSB first.
+            // Sample TDO before each active TCK edge; result is shifted LSB first.
             for (b = 0; b < 128; b = b + 1) begin
                 @(negedge tck);
                 tms = (b == 127);
@@ -338,53 +345,50 @@ module tb_ijtag_aes_top;
                 #1;
             end
 
-            drive_cycle(1'b1, 1'b0); // Exit1-DR -> Update-DR
-            drive_cycle(1'b0, 1'b0); // Update-DR -> Run-Test/Idle
+            exit_update_dr();
         end
     endtask
 
-    task automatic run_transaction(
-        input reg mode,
+    task automatic run_encryption(
+        input [2:0] cfg,
         input [127:0] input_block,
         output reg [127:0] output_block
     );
         begin
-            // Set the mode before reset/releasing reset so it is stable
-            // throughout the AES configuration write.
-            decrypt_mode = mode;
-            payload = {
-                256'h603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4,
-                input_block
-            };
+            // The new wrapper is encryption-only. Keep the compatibility
+            // top-level decrypt_mode input inactive.
+            decrypt_mode = 1'b0;
+            payload = {AES_KEY, input_block};
 
             reset_environment();
-            load_instruction(IJTAG_INSTR);
-            check(select_ijtag === 1'b1, "IJTAG instruction selected");
-            open_all_sibs();
-            load_aes_payload(payload);
+            program_sib_config(cfg);
 
-            // Restore the scan path if payload shifting changed SIB states.
-            if ({sib1_enable,sib2_enable,sib3_enable} !== 3'b111)
-                open_all_sibs();
-            
             check(
-                {sib1_enable,sib2_enable,sib3_enable} === 3'b111,
-                "SIB path open before AES result readout"
+                dut.instrument_enable === 1'b1,
+                "Any nonzero configuration enables the shared AES instrument"
+            );
+            check(
+                dut.selected_sib === ((cfg == 3'b001) ? 2'd1 :
+                                      (cfg == 3'b010) ? 2'd2 :
+                                      (cfg == 3'b100) ? 2'd3 : 2'd0),
+                "Selected-SIB output follows the one-hot or multi-hot rule"
             );
 
-            $display("[MONITOR] decrypt_mode=%b", decrypt_mode);
+            load_aes_payload(payload);
+
+            $display("[MONITOR] Selected SIB=%0d", dut.selected_sib);
             $display("[MONITOR] Loaded key       = %064h",
-                     dut.u_aes_ijtag_wrapper.key_reg);
-            $display("[MONITOR] Loaded input     = %032h",
-                     dut.u_aes_ijtag_wrapper.block_reg);
+                     dut.u_shared_aes_instrument.key_reg);
+            $display("[MONITOR] Loaded plaintext = %032h",
+                     dut.u_shared_aes_instrument.block_reg);
 
             check(
-                dut.u_aes_ijtag_wrapper.key_reg === payload[383:128],
+                dut.u_shared_aes_instrument.key_reg === payload[383:128],
                 "AES-256 key loaded correctly"
             );
             check(
-                dut.u_aes_ijtag_wrapper.block_reg === payload[127:0],
-                "Input block loaded correctly"
+                dut.u_shared_aes_instrument.block_reg === payload[127:0],
+                "AES input block loaded correctly"
             );
 
             wait_for_aes();
@@ -392,10 +396,41 @@ module tb_ijtag_aes_top;
         end
     endtask
 
+    task automatic test_configuration_register;
+        integer b;
+        begin
+            $display("\n[TEST 0] CONFIGURATION REGISTER RESET / CAPTURE");
+            reset_environment();
+            load_instruction(SIB_CONFIG_INSTR);
+            enter_shift_dr();
+
+            observed_config = 3'b000;
+            for (b = 0; b < 3; b = b + 1) begin
+                @(negedge tck);
+                tms = (b == 2);
+                tdi = tdo; // Shift the sampled bit back in to preserve config.
+                #1;
+                observed_config[b] = tdo;
+                tdi = observed_config[b];
+                @(posedge tck);
+                #1;
+            end
+
+            exit_update_dr();
+            check(observed_config === 3'b000,
+                  "Capture-DR reads the reset configuration");
+            check({sib3_enable,sib2_enable,sib1_enable} === 3'b000,
+                  "Readback scan preserves the reset configuration");
+
+            load_instruction(IJTAG_INSTR);
+        end
+    endtask
+
     initial begin : run_test
         errors = 0;
         checks = 0;
         timeout_count = 0;
+        bit_index = 0;
 
         tms = 1'b1;
         tdi = 1'b0;
@@ -403,67 +438,70 @@ module tb_ijtag_aes_top;
         trst_n = 1'b0;
         reset_n = 1'b0;
 
-        expected_ciphertext = 128'hf3eed1bdb5d2a03c064b5a7e3db181f8;
-        expected_plaintext  = 128'h6bc1bee22e409f96e93d7e117393172a;
-
         $display("");
         $display("====================================================");
-        $display(" IJTAG + AES-256 ENCRYPTION AND DECRYPTION TEST");
+        $display(" IJTAG SHARED AES-256 LAYERED TESTBENCH");
         $display("====================================================");
 
-        test_sib3_bypass();
+        test_configuration_register();
 
-        // First transaction: encryption.
-        $display("\n[TEST 1] AES-256 ENCRYPTION");
-        run_transaction(
-            1'b0,
-            128'h6bc1bee22e409f96e93d7e117393172a,
-            ciphertext
-        );
+        $display("\n[TEST 2] ALL EIGHT SIB CONFIGURATIONS");
+        check_configuration(3'b000, 2'd0, 1'b0);
+        check_configuration(3'b001, 2'd1, 1'b1);
+        check_configuration(3'b010, 2'd2, 1'b1);
+        check_configuration(3'b011, 2'd0, 1'b1);
+        check_configuration(3'b100, 2'd3, 1'b1);
+        check_configuration(3'b101, 2'd0, 1'b1);
+        check_configuration(3'b110, 2'd0, 1'b1);
+        check_configuration(3'b111, 2'd0, 1'b1);
 
-        $display("[SCOREBOARD] Expected ciphertext: %032h", expected_ciphertext);
-        $display("[SCOREBOARD] Observed ciphertext: %032h", ciphertext);
-        check(
-            ciphertext === expected_ciphertext,
-            "AES-256 encryption known-answer vector"
-        );
+        test_zero_config_bypass();
 
-        // Second transaction: decryption of the known-answer ciphertext.
-        // A fresh reset occurs inside run_transaction; mode is set first.
-        $display("\n[TEST 2] AES-256 DECRYPTION");
-        run_transaction(
-            1'b1,
-            expected_ciphertext,
-            recovered_plaintext
-        );
+        $display("\n[TEST 3] AES-256 KNOWN-ANSWER THROUGH ALL NONZERO CONFIGURATIONS");
+        run_encryption(3'b001, AES_PLAINTEXT, ciphertext);
+        check(ciphertext === AES_EXPECTED_CIPHERTEXT,
+              "AES known-answer encryption through configuration 001");
 
-        $display("[SCOREBOARD] Expected plaintext : %032h", expected_plaintext);
-        $display("[SCOREBOARD] Recovered plaintext: %032h", recovered_plaintext);
-        check(
-            recovered_plaintext === expected_plaintext,
-            "AES-256 decryption recovers original plaintext"
-        );
+        run_encryption(3'b010, AES_PLAINTEXT, ciphertext);
+        check(ciphertext === AES_EXPECTED_CIPHERTEXT,
+              "AES known-answer encryption through configuration 010");
 
-        // Randomized round-trip trials. The key remains fixed so each trial
-        // exercises randomized data through the existing IJTAG/AES path.
-        // The fixed known-answer tests above independently check correctness.
-        $display("\n[TEST 3] RANDOMIZED AES-256 ROUND-TRIP TESTS");
+        run_encryption(3'b011, AES_PLAINTEXT, ciphertext);
+        check(ciphertext === AES_EXPECTED_CIPHERTEXT,
+              "AES known-answer encryption through configuration 011");
+
+        run_encryption(3'b100, AES_PLAINTEXT, ciphertext);
+        check(ciphertext === AES_EXPECTED_CIPHERTEXT,
+              "AES known-answer encryption through configuration 100");
+
+        run_encryption(3'b101, AES_PLAINTEXT, ciphertext);
+        check(ciphertext === AES_EXPECTED_CIPHERTEXT,
+              "AES known-answer encryption through configuration 101");
+
+        run_encryption(3'b110, AES_PLAINTEXT, ciphertext);
+        check(ciphertext === AES_EXPECTED_CIPHERTEXT,
+              "AES known-answer encryption through configuration 110");
+
+        run_encryption(3'b111, AES_PLAINTEXT, ciphertext);
+        check(ciphertext === AES_EXPECTED_CIPHERTEXT,
+              "AES known-answer encryption through configuration 111");
+
+        $display("\n[TEST 4] RANDOMIZED ENCRYPTION REPEATABILITY");
         for (bit_index = 0; bit_index < 10; bit_index = bit_index + 1) begin
-            expected_plaintext = {
-                $urandom, $urandom, $urandom, $urandom
-            };
+            random_plaintext = {$urandom, $urandom, $urandom, $urandom};
+            sib_config = $urandom;
+            if (sib_config == 3'b000)
+                sib_config = 3'b001;
 
-            $display("[RANDOM] Trial %0d plaintext: %032h",
-                     bit_index + 1, expected_plaintext);
+            $display("[RANDOM] Trial %0d config=%03b plaintext=%032h",
+                     bit_index + 1, sib_config, random_plaintext);
 
-            run_transaction(1'b0, expected_plaintext, ciphertext);
-            run_transaction(1'b1, ciphertext, recovered_plaintext);
+            run_encryption(sib_config, random_plaintext, ciphertext);
+            run_encryption(sib_config, random_plaintext, repeat_ciphertext);
 
-            $display("[RANDOM] Trial %0d recovered:  %032h",
-                     bit_index + 1, recovered_plaintext);
             check(
-                recovered_plaintext === expected_plaintext,
-                "Randomized AES-256 encrypt/decrypt round trip"
+                ciphertext === repeat_ciphertext,
+                "Repeated random encryption gives the same ciphertext"
             );
         end
 
@@ -480,7 +518,7 @@ module tb_ijtag_aes_top;
     end
 
     initial begin : global_timeout
-        #200000;
+        #1000000;
         $display("[TIMEOUT] Global simulation timeout.");
         $finish;
     end

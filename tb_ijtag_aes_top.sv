@@ -23,6 +23,60 @@ module tb_ijtag_aes_top;
     reg [127:0] repeat_ciphertext;
     reg [127:0] observed_config;
 
+
+    // Functional coverage samples are taken at completed test checkpoints.
+    reg [2:0] coverage_sib_config;
+    reg       coverage_instrument_enable;
+    reg [1:0] coverage_selected_sib;
+    reg [2:0] coverage_aes_config;
+    reg       coverage_aes_completed;
+
+    // Record each of the eight SIB configurations and the corresponding
+    // instrument-enable and selected-SIB decode values.
+    covergroup sib_configuration_cg;
+        cp_sib_config : coverpoint coverage_sib_config {
+            bins config_000 = {3'b000};
+            bins config_001 = {3'b001};
+            bins config_010 = {3'b010};
+            bins config_011 = {3'b011};
+            bins config_100 = {3'b100};
+            bins config_101 = {3'b101};
+            bins config_110 = {3'b110};
+            bins config_111 = {3'b111};
+        }
+        cp_instrument_enable : coverpoint coverage_instrument_enable {
+            bins disabled = {1'b0};
+            bins enabled  = {1'b1};
+        }
+        cp_selected_sib : coverpoint coverage_selected_sib {
+            bins none = {2'd0};
+            bins sib1 = {2'd1};
+            bins sib2 = {2'd2};
+            bins sib3 = {2'd3};
+        }
+    endgroup
+
+    // AES is tested in encryption mode only. Cross the seven accessible
+    // SIB configurations with successful AES completion; 000 is bypass-only.
+    covergroup aes_transaction_cg;
+        cp_aes_config : coverpoint coverage_aes_config {
+            bins config_001 = {3'b001};
+            bins config_010 = {3'b010};
+            bins config_011 = {3'b011};
+            bins config_100 = {3'b100};
+            bins config_101 = {3'b101};
+            bins config_110 = {3'b110};
+            bins config_111 = {3'b111};
+        }
+        cp_aes_completed : coverpoint coverage_aes_completed {
+            bins completed = {1'b1};
+        }
+        config_x_completion : cross cp_aes_config, cp_aes_completed;
+    endgroup
+
+    sib_configuration_cg sib_configuration_cov = new();
+    aes_transaction_cg   aes_transaction_cov   = new();
+
     localparam [3:0] IJTAG_INSTR = 4'b0010;
     localparam [3:0] SIB_CONFIG_INSTR = 4'b0011;
     localparam [3:0] TAP_SHIFT_DR = 4'd4;
@@ -93,6 +147,15 @@ module tb_ijtag_aes_top;
         end
     endtask
 
+    // Sample actual DUT configuration/decode signals for functional coverage.
+    task automatic sample_sib_configuration;
+        begin
+            coverage_sib_config = {sib3_enable, sib2_enable, sib1_enable};
+            coverage_instrument_enable = dut.instrument_enable;
+            coverage_selected_sib = dut.selected_sib;
+            sib_configuration_cov.sample();
+        end
+    endtask
     task automatic reset_environment;
         begin
             @(negedge tck);
@@ -177,6 +240,8 @@ module tb_ijtag_aes_top;
                 {sib3_enable,sib2_enable,sib1_enable} === cfg,
                 "SIB configuration register updated"
             );
+
+            sample_sib_configuration();
 
             load_instruction(IJTAG_INSTR);
             check(select_ijtag === 1'b1, "IJTAG instruction selected");
@@ -392,6 +457,9 @@ module tb_ijtag_aes_top;
             );
 
             wait_for_aes();
+            coverage_aes_config = cfg;
+            coverage_aes_completed = (aes_done === 1'b1);
+            aes_transaction_cov.sample();
             read_result(output_block);
         end
     endtask

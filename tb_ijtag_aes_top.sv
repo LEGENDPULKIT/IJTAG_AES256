@@ -17,6 +17,7 @@ module tb_ijtag_aes_top;
     integer bit_index;
 
     reg [2:0] sib_config;
+    reg [255:0] active_key;
     reg [383:0] payload;
     reg [127:0] ciphertext;
     reg [127:0] random_plaintext;
@@ -445,7 +446,7 @@ module tb_ijtag_aes_top;
             // The new wrapper is encryption-only. Keep the compatibility
             // top-level decrypt_mode input inactive.
             decrypt_mode = 1'b0;
-            payload = {AES_KEY, input_block};
+            payload = {active_key, input_block};
 
             reset_environment();
             program_sib_config(cfg);
@@ -699,6 +700,7 @@ module tb_ijtag_aes_top;
         coverage_core_we = 1'b0;
         coverage_core_address = 8'h00;
         coverage_core_write_data = 32'h00000000;
+        active_key = AES_KEY;
 
         tms = 1'b1;
         tdi = 1'b0;
@@ -755,6 +757,13 @@ module tb_ijtag_aes_top;
         run_encryption(3'b111, AES_PLAINTEXT, ciphertext);
         check(ciphertext === AES_EXPECTED_CIPHERTEXT,
               "AES known-answer encryption through configuration 111");
+
+        $display("\n[TEST 3A] AES INPUT TOGGLE EXTREMES");
+        active_key = 256'b0;
+        run_encryption(3'b001, 128'b0, ciphertext);
+        active_key = {256{1'b1}};
+        run_encryption(3'b001, {128{1'b1}}, ciphertext);
+        active_key = AES_KEY;
 
         $display("\n[TEST 4] RANDOMIZED ENCRYPTION REPEATABILITY");
         for (bit_index = 0; bit_index < 10; bit_index = bit_index + 1) begin

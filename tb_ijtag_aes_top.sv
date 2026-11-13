@@ -767,6 +767,8 @@ module tb_ijtag_aes_top;
 
         $display("\n[TEST 4] RANDOMIZED ENCRYPTION REPEATABILITY");
         for (bit_index = 0; bit_index < 10; bit_index = bit_index + 1) begin
+            active_key = {$urandom, $urandom, $urandom, $urandom,
+                          $urandom, $urandom, $urandom, $urandom};
             random_plaintext = {$urandom, $urandom, $urandom, $urandom};
             sib_config = $urandom;
             if (sib_config == 3'b000)

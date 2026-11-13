@@ -22,6 +22,70 @@ module tb_ijtag_aes_top;
     reg [127:0] random_plaintext;
     reg [127:0] repeat_ciphertext;
     reg [127:0] observed_config;
+    reg [31:0] observed_idcode;
+    reg [7:0] observed_generic_dr;
+
+    // Separate bus driver used only to exercise the supplied AES core's
+    // decryption mode. The IJTAG wrapper itself remains encryption-only.
+    reg        coverage_core_cs;
+    reg        coverage_core_we;
+    reg [7:0]  coverage_core_address;
+    reg [31:0] coverage_core_write_data;
+    wire [31:0] coverage_core_read_data;
+
+
+    // Functional coverage samples are taken at completed test checkpoints.
+    reg [2:0] coverage_sib_config;
+    reg       coverage_instrument_enable;
+    reg [1:0] coverage_selected_sib;
+    reg [2:0] coverage_aes_config;
+    reg       coverage_aes_completed;
+
+    // Record each of the eight SIB configurations and the corresponding
+    // instrument-enable and selected-SIB decode values.
+    covergroup sib_configuration_cg;
+        cp_sib_config : coverpoint coverage_sib_config {
+            bins config_000 = {3'b000};
+            bins config_001 = {3'b001};
+            bins config_010 = {3'b010};
+            bins config_011 = {3'b011};
+            bins config_100 = {3'b100};
+            bins config_101 = {3'b101};
+            bins config_110 = {3'b110};
+            bins config_111 = {3'b111};
+        }
+        cp_instrument_enable : coverpoint coverage_instrument_enable {
+            bins disabled = {1'b0};
+            bins enabled  = {1'b1};
+        }
+        cp_selected_sib : coverpoint coverage_selected_sib {
+            bins none = {2'd0};
+            bins sib1 = {2'd1};
+            bins sib2 = {2'd2};
+            bins sib3 = {2'd3};
+        }
+    endgroup
+
+    // AES is tested in encryption mode only. Cross the seven accessible
+    // SIB configurations with successful AES completion; 000 is bypass-only.
+    covergroup aes_transaction_cg;
+        cp_aes_config : coverpoint coverage_aes_config {
+            bins config_001 = {3'b001};
+            bins config_010 = {3'b010};
+            bins config_011 = {3'b011};
+            bins config_100 = {3'b100};
+            bins config_101 = {3'b101};
+            bins config_110 = {3'b110};
+            bins config_111 = {3'b111};
+        }
+        cp_aes_completed : coverpoint coverage_aes_completed {
+            bins completed = {1'b1};
+        }
+        config_x_completion : cross cp_aes_config, cp_aes_completed;
+    endgroup
+
+    sib_configuration_cg sib_configuration_cov = new();
+    aes_transaction_cg   aes_transaction_cov   = new();
 
     localparam [3:0] IJTAG_INSTR = 4'b0010;
     localparam [3:0] SIB_CONFIG_INSTR = 4'b0011;
@@ -53,6 +117,18 @@ module tb_ijtag_aes_top;
         .sib2_enable(sib2_enable),
         .sib3_enable(sib3_enable),
         .select_ijtag(select_ijtag)
+    );
+
+    // Auxiliary AES-core instance for direct decryption-path coverage.
+    // This does not alter the IJTAG top-level instance or its connections.
+    aes u_coverage_aes_core (
+        .clk        (clk),
+        .reset_n    (reset_n),
+        .cs         (coverage_core_cs),
+        .we         (coverage_core_we),
+        .address    (coverage_core_address),
+        .write_data (coverage_core_write_data),
+        .read_data  (coverage_core_read_data)
     );
 
     initial begin
@@ -93,6 +169,15 @@ module tb_ijtag_aes_top;
         end
     endtask
 
+    // Sample actual DUT configuration/decode signals for functional coverage.
+    task automatic sample_sib_configuration;
+        begin
+            coverage_sib_config = {sib3_enable, sib2_enable, sib1_enable};
+            coverage_instrument_enable = dut.instrument_enable;
+            coverage_selected_sib = dut.selected_sib;
+            sib_configuration_cov.sample();
+        end
+    endtask
     task automatic reset_environment;
         begin
             @(negedge tck);
@@ -177,6 +262,8 @@ module tb_ijtag_aes_top;
                 {sib3_enable,sib2_enable,sib1_enable} === cfg,
                 "SIB configuration register updated"
             );
+
+            sample_sib_configuration();
 
             load_instruction(IJTAG_INSTR);
             check(select_ijtag === 1'b1, "IJTAG instruction selected");
@@ -392,6 +479,9 @@ module tb_ijtag_aes_top;
             );
 
             wait_for_aes();
+            coverage_aes_config = cfg;
+            coverage_aes_completed = (aes_done === 1'b1);
+            aes_transaction_cov.sample();
             read_result(output_block);
         end
     endtask
@@ -426,11 +516,189 @@ module tb_ijtag_aes_top;
         end
     endtask
 
+    // Read a register on the auxiliary AES core's memory-mapped bus.
+    task automatic coverage_core_read(
+        input [7:0] address,
+        output reg [31:0] value
+    );
+        begin
+            @(negedge clk);
+            coverage_core_cs = 1'b1;
+            coverage_core_we = 1'b0;
+            coverage_core_address = address;
+            coverage_core_write_data = 32'b0;
+            #1;
+            value = coverage_core_read_data;
+            @(posedge clk);
+            #1;
+            coverage_core_cs = 1'b0;
+        end
+    endtask
+
+    // Write one register on the auxiliary AES core's memory-mapped bus.
+    task automatic coverage_core_write(
+        input [7:0] address,
+        input [31:0] value
+    );
+        begin
+            @(negedge clk);
+            coverage_core_cs = 1'b1;
+            coverage_core_we = 1'b1;
+            coverage_core_address = address;
+            coverage_core_write_data = value;
+            @(posedge clk);
+            #1;
+            coverage_core_cs = 1'b0;
+            coverage_core_we = 1'b0;
+        end
+    endtask
+
+    // Exercise the AES core's decryption branch with the standard AES-256
+    // known-answer pair. This raises AES decrypt/inverse-S-box code coverage;
+    // it is a core-level test, not a claim that IJTAG decrypt is implemented.
+    task automatic test_aes_core_decryption;
+        integer word_number;
+        integer wait_cycles;
+        reg [31:0] status_word;
+        reg [127:0] decrypted_block;
+        begin
+            $display("\n[TEST] AES-256 CORE DECRYPTION-PATH COVERAGE");
+            reset_environment();
+
+            // Wait until the core reports idle/ready before starting key setup.
+            wait_cycles = 0;
+            status_word = 32'b0;
+            while ((status_word[0] !== 1'b1) &&
+                   (wait_cycles < AES_TIMEOUT_CYCLES)) begin
+                coverage_core_read(8'h09, status_word);
+                wait_cycles = wait_cycles + 1;
+            end
+            check(status_word[0] === 1'b1,
+                  "Standalone AES core reaches ready before decryption");
+
+            // Load the AES-256 key as eight 32-bit bus words.
+            for (word_number = 0; word_number < 8; word_number = word_number + 1)
+                coverage_core_write(
+                    8'h10 + word_number,
+                    AES_KEY[255 - (word_number * 32) -: 32]
+                );
+
+            // keylen=1 selects AES-256; encdec=0 selects decryption.
+            coverage_core_write(8'h0A, 32'h00000002);
+            coverage_core_write(8'h08, 32'h00000001); // INIT
+
+            // Observe INIT busy, then wait for key expansion to finish.
+            wait_cycles = 0;
+            status_word = 32'h00000001;
+            while ((status_word[0] !== 1'b0) &&
+                   (wait_cycles < AES_TIMEOUT_CYCLES)) begin
+                coverage_core_read(8'h09, status_word);
+                wait_cycles = wait_cycles + 1;
+            end
+            check(status_word[0] === 1'b0,
+                  "AES core enters busy state for decryption key setup");
+
+            wait_cycles = 0;
+            while ((status_word[0] !== 1'b1) &&
+                   (wait_cycles < AES_TIMEOUT_CYCLES)) begin
+                coverage_core_read(8'h09, status_word);
+                wait_cycles = wait_cycles + 1;
+            end
+            check(status_word[0] === 1'b1,
+                  "AES core completes decryption key setup");
+
+            // Decrypt the known ciphertext using the same key.
+            for (word_number = 0; word_number < 4; word_number = word_number + 1)
+                coverage_core_write(
+                    8'h20 + word_number,
+                    AES_EXPECTED_CIPHERTEXT[127 - (word_number * 32) -: 32]
+                );
+            coverage_core_write(8'h08, 32'h00000002); // NEXT
+
+            wait_cycles = 0;
+            status_word = 32'b0;
+            while ((status_word[1] !== 1'b1) &&
+                   (wait_cycles < AES_TIMEOUT_CYCLES)) begin
+                coverage_core_read(8'h09, status_word);
+                wait_cycles = wait_cycles + 1;
+            end
+            check(status_word[1] === 1'b1,
+                  "AES core asserts valid after decryption");
+
+            decrypted_block = 128'b0;
+            for (word_number = 0; word_number < 4; word_number = word_number + 1) begin
+                coverage_core_read(8'h30 + word_number, status_word);
+                decrypted_block[127 - (word_number * 32) -: 32] = status_word;
+            end
+            check(decrypted_block === AES_PLAINTEXT,
+                  "AES-256 core decrypts the known ciphertext to the plaintext");
+        end
+    endtask
+
+    // Exercise TAP data-register selections not visited by the main IJTAG
+    // encryption tests: reset-default IDCODE, one-bit TAP BYPASS, and the
+    // retained generic DR path for an unimplemented instruction value.
+    task automatic test_tap_data_registers;
+        integer b;
+        begin
+            $display("\n[TEST] TAP IDCODE, BYPASS, AND GENERIC DATA REGISTER");
+            reset_environment();
+
+            // IDCODE is the reset-selected instruction. The serial register
+            // returns the parameter value least-significant bit first.
+            enter_shift_dr();
+            observed_idcode = 32'b0;
+            for (b = 0; b < 32; b = b + 1) begin
+                @(negedge tck);
+                tms = (b == 31);
+                tdi = 1'b0;
+                #1;
+                observed_idcode[b] = tdo;
+                @(posedge tck);
+                #1;
+            end
+            exit_update_dr();
+            check(observed_idcode === 32'h00000001,
+                  "TAP shifts out the configured 32-bit IDCODE");
+
+            // The TAP BYPASS data register is exactly one bit long.
+            load_instruction(4'b1111);
+            enter_shift_dr();
+            drive_cycle(1'b0, 1'b1);
+            check(tdo === 1'b1,
+                  "TAP BYPASS returns the previously shifted bit");
+            drive_cycle(1'b1, 1'b0);
+            exit_update_dr();
+
+            // The prototype retains an 8-bit generic DR for otherwise
+            // unimplemented instruction values; Capture-DR loads 0xAA.
+            load_instruction(4'b0000);
+            enter_shift_dr();
+            observed_generic_dr = 8'b0;
+            for (b = 0; b < 8; b = b + 1) begin
+                @(negedge tck);
+                tms = (b == 7);
+                tdi = 1'b0;
+                #1;
+                observed_generic_dr[b] = tdo;
+                @(posedge tck);
+                #1;
+            end
+            exit_update_dr();
+            check(observed_generic_dr === 8'hAA,
+                  "Generic TAP data register captures and shifts 0xAA");
+        end
+    endtask
+
     initial begin : run_test
         errors = 0;
         checks = 0;
         timeout_count = 0;
         bit_index = 0;
+        coverage_core_cs = 1'b0;
+        coverage_core_we = 1'b0;
+        coverage_core_address = 8'h00;
+        coverage_core_write_data = 32'h00000000;
 
         tms = 1'b1;
         tdi = 1'b0;
@@ -444,6 +712,8 @@ module tb_ijtag_aes_top;
         $display("====================================================");
 
         test_configuration_register();
+        test_tap_data_registers();
+        test_aes_core_decryption();
 
         $display("\n[TEST 2] ALL EIGHT SIB CONFIGURATIONS");
         check_configuration(3'b000, 2'd0, 1'b0);

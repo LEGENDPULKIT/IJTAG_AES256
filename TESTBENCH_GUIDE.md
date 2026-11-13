@@ -13,7 +13,9 @@ This design has one shared AES instrument:
 - One-hot configurations 001, 010, and 100 report selected_sib values 1, 2, and 3.
 - Multi-hot configurations 011, 101, 110, and 111 report selected_sib=0, but instrument_enable remains 1. A selected_sib value of 0 does not by itself mean AES is disabled.
 
-The AES wrapper is encryption-only here, so decrypt_mode is kept low.
+The AES wrapper supports both AES-256 encryption and decryption. The testbench
+uses decrypt_mode to select the operation and checks a known-answer decrypt
+transaction through the IJTAG scan path.
 
 ## 2. Test flowchart
 
@@ -50,7 +52,7 @@ The main order is in the run_test initial block. Each encryption task also makes
 - aes_busy and aes_done report AES activity and completion.
 - sib1_enable, sib2_enable, sib3_enable report the programmed SIB bits.
 - select_ijtag indicates whether the IJTAG instruction is selected.
-- decrypt_mode is held low because the current wrapper performs encryption.
+- decrypt_mode selects encryption when low and decryption when high.
 
 ### Scoreboard and working variables
 
@@ -167,7 +169,8 @@ Initializes result to zero, enters Shift-DR safely, prints the internal result r
 
 One complete encryption transaction:
 
-1. Sets decrypt_mode low and creates payload={AES_KEY,input_block}.
+1. Sets decrypt_mode for the selected operation and creates
+   payload={AES_KEY,input_block}.
 2. Resets the design.
 3. Programs cfg and checks that the shared AES instrument is enabled.
 4. Checks the selected_sib rule: one-hot settings report 1, 2, or 3; multi-hot settings report 0.
@@ -210,6 +213,9 @@ f3eed1bdb5d2a03c064b5a7e3db181f8
 ~~~
 
 This checks against a known expected answer, providing an independent correctness check for the fixed vector.
+
+The IJTAG decrypt test then scans in the known ciphertext with the same key,
+selects decrypt_mode, and checks that the scanned result equals AES_PLAINTEXT.
 
 ### Test 4: randomized repeatability
 

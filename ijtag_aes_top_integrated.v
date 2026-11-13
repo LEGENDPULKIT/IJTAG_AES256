@@ -115,6 +115,7 @@ module ijtag_aes_top (
     aes_ijtag_wrapper u_shared_aes_instrument (
         .clk          (clk),
         .reset_n      (reset_n),
+        .decrypt_mode(decrypt_mode),
 
         .instrument_tdi (instrument_tdi),
         .instrument_tdo (instrument_tdo),
@@ -130,9 +131,5 @@ module ijtag_aes_top (
         .aes_busy     (aes_busy),
         .aes_done     (aes_done)
     );
-
-    // The current AES wrapper supports encryption only.
-    // Keep decrypt_mode for compatibility with the existing top-level port.
-    wire unused_decrypt_mode = decrypt_mode;
 
 endmodule

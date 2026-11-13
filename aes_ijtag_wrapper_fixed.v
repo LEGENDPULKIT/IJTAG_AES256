@@ -9,8 +9,8 @@
 //
 // Sequence:
 //   1. Shift 384 bits through the IJTAG instrument.
-//   2. After the 384th bit, the wrapper automatically programs the supplied
-//      AES core and starts one AES-256 encryption.
+//   2. After the 384th bit, the wrapper programs the supplied AES core for
+//      AES-256 encryption or decryption and starts the operation.
 //   3. When AES reports result_valid, capture_dr loads the 128-bit ciphertext
 //      into scan_reg[127:0].
 //   4. Shift out ciphertext LSB-first through instrument_tdo.
@@ -22,6 +22,7 @@
 module aes_ijtag_wrapper (
     input  wire        clk,
     input  wire        reset_n,
+    input  wire        decrypt_mode,
 
     input  wire        instrument_tdi,
     output wire        instrument_tdo,
@@ -57,6 +58,7 @@ module aes_ijtag_wrapper (
 
     reg        busy_reg;
     reg        done_reg;
+    reg        decrypt_reg;
 
     // AES memory-mapped bus.
     reg        aes_cs;
@@ -106,8 +108,8 @@ module aes_ijtag_wrapper (
                     aes_cs         = 1'b1;
                     aes_we         = 1'b1;
                     aes_address    = 8'h0A;
-                    // Secworks AES core: keylen=1 selects AES-256 and encdec=1 selects encryption.
-                    aes_write_data = 32'h00000003;
+                    // Secworks AES core: keylen=1 selects AES-256; encdec=0 decrypts.
+                    aes_write_data = {30'b0, 1'b1, ~decrypt_reg};
                 end
 
                 ST_INIT:
@@ -177,6 +179,7 @@ module aes_ijtag_wrapper (
             word_index  <= 4'd0;
             busy_reg    <= 1'b0;
             done_reg    <= 1'b0;
+            decrypt_reg <= 1'b0;
         end
         else
         begin
@@ -212,6 +215,7 @@ module aes_ijtag_wrapper (
                         shift_count <= 9'd0;
                         word_index <= 4'd0;
                         busy_reg <= 1'b1;
+                        decrypt_reg <= decrypt_mode;
                         state <= ST_LOAD_KEY;
                     end
                     else

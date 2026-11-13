@@ -2,7 +2,7 @@
 
 // Layered SystemVerilog testbench for the shared-AES IJTAG design.
 // The 3-bit configuration register selects one shared AES instrument.
-// AES wrapper in this design supports encryption only.
+// The AES wrapper supports encryption and decryption.
 
 module tb_ijtag_aes_top;
 
@@ -26,8 +26,7 @@ module tb_ijtag_aes_top;
     reg [31:0] observed_idcode;
     reg [7:0] observed_generic_dr;
 
-    // Separate bus driver used only to exercise the supplied AES core's
-    // decryption mode. The IJTAG wrapper itself remains encryption-only.
+    // Separate bus driver used to exercise the supplied AES core directly.
     reg        coverage_core_cs;
     reg        coverage_core_we;
     reg [7:0]  coverage_core_address;
@@ -67,8 +66,8 @@ module tb_ijtag_aes_top;
         }
     endgroup
 
-    // AES is tested in encryption mode only. Cross the seven accessible
-    // SIB configurations with successful AES completion; 000 is bypass-only.
+    // Cross the seven accessible SIB configurations with successful AES
+    // completion; 000 is bypass-only.
     covergroup aes_transaction_cg;
         cp_aes_config : coverpoint coverage_aes_config {
             bins config_001 = {3'b001};
@@ -437,15 +436,14 @@ module tb_ijtag_aes_top;
         end
     endtask
 
-    task automatic run_encryption(
+    task automatic run_aes_transaction(
         input [2:0] cfg,
+        input reg operation_decrypt,
         input [127:0] input_block,
         output reg [127:0] output_block
     );
         begin
-            // The new wrapper is encryption-only. Keep the compatibility
-            // top-level decrypt_mode input inactive.
-            decrypt_mode = 1'b0;
+            decrypt_mode = operation_decrypt;
             payload = {active_key, input_block};
 
             reset_environment();
@@ -484,6 +482,26 @@ module tb_ijtag_aes_top;
             coverage_aes_completed = (aes_done === 1'b1);
             aes_transaction_cov.sample();
             read_result(output_block);
+        end
+    endtask
+
+    task automatic run_encryption(
+        input [2:0] cfg,
+        input [127:0] input_block,
+        output reg [127:0] output_block
+    );
+        begin
+            run_aes_transaction(cfg, 1'b0, input_block, output_block);
+        end
+    endtask
+
+    task automatic run_decryption(
+        input [2:0] cfg,
+        input [127:0] input_block,
+        output reg [127:0] output_block
+    );
+        begin
+            run_aes_transaction(cfg, 1'b1, input_block, output_block);
         end
     endtask
 
@@ -764,6 +782,11 @@ module tb_ijtag_aes_top;
         active_key = {256{1'b1}};
         run_encryption(3'b001, {128{1'b1}}, ciphertext);
         active_key = AES_KEY;
+
+        $display("\n[TEST 3B] IJTAG AES-256 DECRYPTION KNOWN ANSWER");
+        run_decryption(3'b001, AES_EXPECTED_CIPHERTEXT, ciphertext);
+        check(ciphertext === AES_PLAINTEXT,
+              "IJTAG AES-256 decrypts the known ciphertext to plaintext");
 
         $display("\n[TEST 4] RANDOMIZED ENCRYPTION REPEATABILITY");
         for (bit_index = 0; bit_index < 10; bit_index = bit_index + 1) begin

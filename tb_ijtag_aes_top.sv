@@ -18,6 +18,8 @@ module tb_ijtag_aes_top;
 
     reg [2:0] sib_config;
     reg [383:0] payload;
+    reg [255:0] stimulus_key;
+    reg [255:0] random_key;
     reg [127:0] ciphertext;
     reg [127:0] random_plaintext;
     reg [127:0] repeat_ciphertext;
@@ -89,7 +91,14 @@ module tb_ijtag_aes_top;
 
     localparam [3:0] IJTAG_INSTR = 4'b0010;
     localparam [3:0] SIB_CONFIG_INSTR = 4'b0011;
-    localparam [3:0] TAP_SHIFT_DR = 4'd4;
+    localparam [3:0] TAP_SHIFT_DR  = 4'd4;
+    localparam [3:0] TAP_PAUSE_DR  = 4'd6;
+    localparam [3:0] TAP_EXIT2_DR  = 4'd7;
+    localparam [3:0] TAP_UPDATE_DR = 4'd8;
+    localparam [3:0] TAP_SELECT_DR = 4'd2;
+    localparam [3:0] TAP_PAUSE_IR  = 4'd13;
+    localparam [3:0] TAP_EXIT2_IR  = 4'd14;
+    localparam [3:0] TAP_UPDATE_IR = 4'd15;
 
 // definig the AES key, plaintext and expected ciphertext for the known-answer test to load it later on
     localparam [255:0] AES_KEY =
@@ -445,7 +454,7 @@ module tb_ijtag_aes_top;
             // The new wrapper is encryption-only. Keep the compatibility
             // top-level decrypt_mode input inactive.
             decrypt_mode = 1'b0;
-            payload = {AES_KEY, input_block};
+            payload = {stimulus_key, input_block};
 
             reset_environment();
             program_sib_config(cfg);
@@ -690,11 +699,103 @@ module tb_ijtag_aes_top;
         end
     endtask
 
+    // Exercise TAP pause, resume, and Exit2 update paths in both DR and IR.
+    // The payload scan is paused before its configuration bits are shifted,
+    // then resumed and checked to ensure the configuration still commits.
+    task automatic test_tap_pause_resume;
+        integer b;
+        reg [2:0] pause_test_cfg;
+        begin
+            $display("\n[TEST] TAP PAUSE/RESUME FSM PATHS");
+            reset_environment();
+
+            // Route through Pause-IR, hold there for a cycle, and resume Shift-IR.
+            drive_cycle(1'b1, 1'b0); // Run-Test/Idle -> Select-DR
+            drive_cycle(1'b1, 1'b0); // Select-DR -> Select-IR
+            drive_cycle(1'b0, 1'b0); // Select-IR -> Capture-IR
+            drive_cycle(1'b0, 1'b0); // Capture-IR -> Shift-IR
+            drive_cycle(1'b1, 1'b0); // Shift-IR -> Exit1-IR
+            drive_cycle(1'b0, 1'b0); // Exit1-IR -> Pause-IR
+            check(dut.u_jtag_tap.state === TAP_PAUSE_IR,
+                  "TAP reaches Pause-IR");
+            drive_cycle(1'b0, 1'b0); // Pause-IR -> Pause-IR
+            check(dut.u_jtag_tap.state === TAP_PAUSE_IR,
+                  "TAP holds in Pause-IR when TMS is low");
+            drive_cycle(1'b1, 1'b0); // Pause-IR -> Exit2-IR
+            check(dut.u_jtag_tap.state === TAP_EXIT2_IR,
+                  "TAP reaches Exit2-IR");
+            drive_cycle(1'b0, 1'b0); // Exit2-IR -> Shift-IR
+
+            for (b = 0; b < 4; b = b + 1)
+                drive_cycle((b == 3), IJTAG_INSTR[b]);
+            drive_cycle(1'b1, 1'b0); // Exit1-IR -> Update-IR
+            check(dut.u_jtag_tap.state === TAP_UPDATE_IR,
+                  "Resumed instruction scan reaches Update-IR");
+            drive_cycle(1'b0, 1'b0); // Update-IR -> Run-Test/Idle
+            check(dut.u_jtag_tap.instruction === IJTAG_INSTR,
+                  "Instruction loads correctly after Pause-IR");
+
+            // Cover the alternate Exit2-IR -> Update-IR route and the
+            // Update-IR -> Select-DR transition.
+            drive_cycle(1'b1, 1'b0); // Select-DR
+            drive_cycle(1'b1, 1'b0); // Select-IR
+            drive_cycle(1'b0, 1'b0); // Capture-IR
+            drive_cycle(1'b0, 1'b0); // Shift-IR
+            drive_cycle(1'b1, 1'b0); // Exit1-IR
+            drive_cycle(1'b0, 1'b0); // Pause-IR
+            drive_cycle(1'b1, 1'b0); // Exit2-IR
+            drive_cycle(1'b1, 1'b0); // Update-IR
+            check(dut.u_jtag_tap.state === TAP_UPDATE_IR,
+                  "Exit2-IR can transition directly to Update-IR");
+            drive_cycle(1'b1, 1'b0); // Update-IR -> Select-DR
+            check(dut.u_jtag_tap.state === TAP_SELECT_DR,
+                  "Update-IR reaches Select-DR when TMS is high");
+
+            // Reset, select the configuration DR, pause it, then resume and
+            // shift a complete configuration before committing it.
+            reset_environment();
+            pause_test_cfg = 3'b001;
+            load_instruction(SIB_CONFIG_INSTR);
+            enter_shift_dr();
+            drive_cycle(1'b1, 1'b0); // Shift-DR -> Exit1-DR
+            drive_cycle(1'b0, 1'b0); // Exit1-DR -> Pause-DR
+            check(dut.u_jtag_tap.state === TAP_PAUSE_DR,
+                  "TAP reaches Pause-DR");
+            drive_cycle(1'b0, 1'b0); // Pause-DR -> Pause-DR
+            check(dut.u_jtag_tap.state === TAP_PAUSE_DR,
+                  "TAP holds in Pause-DR when TMS is low");
+            drive_cycle(1'b1, 1'b0); // Pause-DR -> Exit2-DR
+            check(dut.u_jtag_tap.state === TAP_EXIT2_DR,
+                  "TAP reaches Exit2-DR");
+            drive_cycle(1'b0, 1'b0); // Exit2-DR -> Shift-DR
+
+            for (b = 0; b < 3; b = b + 1)
+                drive_cycle((b == 2), pause_test_cfg[b]);
+            exit_update_dr();
+            check({sib3_enable,sib2_enable,sib1_enable} === 3'b001,
+                  "Configuration commits correctly after Pause-DR");
+
+            // Cover Exit2-DR -> Update-DR, plus Update-DR -> Select-DR.
+            enter_shift_dr();
+            drive_cycle(1'b1, 1'b0); // Exit1-DR
+            drive_cycle(1'b0, 1'b0); // Pause-DR
+            drive_cycle(1'b1, 1'b0); // Exit2-DR
+            drive_cycle(1'b1, 1'b0); // Update-DR
+            check(dut.u_jtag_tap.state === TAP_UPDATE_DR,
+                  "Exit2-DR can transition directly to Update-DR");
+            drive_cycle(1'b1, 1'b0); // Update-DR -> Select-DR
+            check(dut.u_jtag_tap.state === TAP_SELECT_DR,
+                  "Update-DR reaches Select-DR when TMS is high");
+            reset_environment();
+        end
+    endtask
     initial begin : run_test
         errors = 0;
         checks = 0;
         timeout_count = 0;
         bit_index = 0;
+        stimulus_key = AES_KEY;
+        random_key = 256'b0;
         coverage_core_cs = 1'b0;
         coverage_core_we = 1'b0;
         coverage_core_address = 8'h00;
@@ -713,6 +814,7 @@ module tb_ijtag_aes_top;
 
         test_configuration_register();
         test_tap_data_registers();
+        test_tap_pause_resume();
         test_aes_core_decryption();
 
         $display("\n[TEST 2] ALL EIGHT SIB CONFIGURATIONS");
@@ -756,19 +858,46 @@ module tb_ijtag_aes_top;
         check(ciphertext === AES_EXPECTED_CIPHERTEXT,
               "AES known-answer encryption through configuration 111");
 
-        $display("\n[TEST 4] RANDOMIZED ENCRYPTION REPEATABILITY");
+        $display("\n[TEST 4] DIRECTED AES-256 KEY-TOGGLE PATTERNS");
+        random_plaintext = AES_PLAINTEXT;
+
+        // Exercise every key bit low, then every key bit high.
+        stimulus_key = 256'b0;
+        run_encryption(3'b001, random_plaintext, ciphertext);
+        check((^ciphertext) !== 1'bx,
+              "AES completes with an all-zero key pattern");
+
+        stimulus_key = {256{1'b1}};
+        run_encryption(3'b001, random_plaintext, ciphertext);
+        check((^ciphertext) !== 1'bx,
+              "AES completes with an all-one key pattern");
+
+        // Alternating key bits exercise both values across the key schedule.
+        stimulus_key = {16{16'hAAAA}};
+        run_encryption(3'b001, random_plaintext, ciphertext);
+        check((^ciphertext) !== 1'bx,
+              "AES completes with an alternating key pattern");
+
+        stimulus_key = AES_KEY;
+        $display("\n[TEST 5] RANDOMIZED AES-256 KEY/PLAINTEXT REPEATABILITY");
         for (bit_index = 0; bit_index < 10; bit_index = bit_index + 1) begin
             random_plaintext = {$urandom, $urandom, $urandom, $urandom};
+            random_key = {$urandom, $urandom, $urandom, $urandom,
+                          $urandom, $urandom, $urandom, $urandom};
+            stimulus_key = random_key;
             sib_config = $urandom;
             if (sib_config == 3'b000)
                 sib_config = 3'b001;
 
-            $display("[RANDOM] Trial %0d config=%03b plaintext=%032h",
-                     bit_index + 1, sib_config, random_plaintext);
+            $display("[RANDOM] Trial %0d config=%03b key=%064h plaintext=%032h",
+                     bit_index + 1, sib_config, stimulus_key, random_plaintext);
 
             run_encryption(sib_config, random_plaintext, ciphertext);
             run_encryption(sib_config, random_plaintext, repeat_ciphertext);
 
+            check(((^ciphertext) !== 1'bx) &&
+                  ((^repeat_ciphertext) !== 1'bx),
+                  "Random AES outputs contain no unknown bits");
             check(
                 ciphertext === repeat_ciphertext,
                 "Repeated random encryption gives the same ciphertext"

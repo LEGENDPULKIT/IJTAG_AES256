@@ -572,16 +572,25 @@ module tb_ijtag_aes_top;
         end
     endtask
 
-    // Exercise the AES core's decryption branch with the standard AES-256
-    // known-answer pair. This raises AES decrypt/inverse-S-box code coverage;
-    // it is a core-level test, not a claim that IJTAG decrypt is implemented.
-    task automatic test_aes_core_decryption;
+    // Exercise both AES core datapaths with the standard AES-256 known-answer pair.
+    task automatic test_aes_core_operation(input reg operation_decrypt);
         integer word_number;
         integer wait_cycles;
         reg [31:0] status_word;
-        reg [127:0] decrypted_block;
+        reg [127:0] operation_input;
+        reg [127:0] expected_output;
         begin
-            $display("\n[TEST] AES-256 CORE DECRYPTION-PATH COVERAGE");
+            if (operation_decrypt) begin
+                operation_input = AES_EXPECTED_CIPHERTEXT;
+                expected_output = AES_PLAINTEXT;
+            end
+            else begin
+                operation_input = AES_PLAINTEXT;
+                expected_output = AES_EXPECTED_CIPHERTEXT;
+            end
+
+            $display("\n[TEST] AES-256 CORE %s PATH COVERAGE",
+                     operation_decrypt ? "DECRYPTION" : "ENCRYPTION");
             reset_environment();
 
             // Wait until the core reports idle/ready before starting key setup.
@@ -593,7 +602,7 @@ module tb_ijtag_aes_top;
                 wait_cycles = wait_cycles + 1;
             end
             check(status_word[0] === 1'b1,
-                  "Standalone AES core reaches ready before decryption");
+                  "Standalone AES core reaches ready before operation");
 
             // Load the AES-256 key as eight 32-bit bus words.
             for (word_number = 0; word_number < 8; word_number = word_number + 1)
@@ -602,8 +611,9 @@ module tb_ijtag_aes_top;
                     AES_KEY[255 - (word_number * 32) -: 32]
                 );
 
-            // keylen=1 selects AES-256; encdec=0 selects decryption.
-            coverage_core_write(8'h0A, 32'h00000002);
+            // keylen=1 selects AES-256; encdec selects the requested path.
+            coverage_core_write(8'h0A,
+                                operation_decrypt ? 32'h00000002 : 32'h00000003);
             coverage_core_write(8'h08, 32'h00000001); // INIT
 
             // Observe INIT busy, then wait for key expansion to finish.
@@ -615,7 +625,7 @@ module tb_ijtag_aes_top;
                 wait_cycles = wait_cycles + 1;
             end
             check(status_word[0] === 1'b0,
-                  "AES core enters busy state for decryption key setup");
+                  "AES core enters busy state for key setup");
 
             wait_cycles = 0;
             while ((status_word[0] !== 1'b1) &&
@@ -624,13 +634,13 @@ module tb_ijtag_aes_top;
                 wait_cycles = wait_cycles + 1;
             end
             check(status_word[0] === 1'b1,
-                  "AES core completes decryption key setup");
+                  "AES core completes key setup");
 
-            // Decrypt the known ciphertext using the same key.
+            // Load the known-answer input block using the same key.
             for (word_number = 0; word_number < 4; word_number = word_number + 1)
                 coverage_core_write(
                     8'h20 + word_number,
-                    AES_EXPECTED_CIPHERTEXT[127 - (word_number * 32) -: 32]
+                    operation_input[127 - (word_number * 32) -: 32]
                 );
             coverage_core_write(8'h08, 32'h00000002); // NEXT
 
@@ -642,15 +652,15 @@ module tb_ijtag_aes_top;
                 wait_cycles = wait_cycles + 1;
             end
             check(status_word[1] === 1'b1,
-                  "AES core asserts valid after decryption");
+                  "AES core asserts valid after operation");
 
-            decrypted_block = 128'b0;
+            operation_input = 128'b0;
             for (word_number = 0; word_number < 4; word_number = word_number + 1) begin
                 coverage_core_read(8'h30 + word_number, status_word);
-                decrypted_block[127 - (word_number * 32) -: 32] = status_word;
+                operation_input[127 - (word_number * 32) -: 32] = status_word;
             end
-            check(decrypted_block === AES_PLAINTEXT,
-                  "AES-256 core decrypts the known ciphertext to the plaintext");
+            check(operation_input === expected_output,
+                  "AES-256 core known-answer operation returns the expected block");
         end
     endtask
 
@@ -709,6 +719,42 @@ module tb_ijtag_aes_top;
         end
     endtask
 
+    task automatic test_tap_pause_and_exit_states;
+        begin
+            $display("\n[TEST] TAP PAUSE AND EXIT2 STATE TRANSITIONS");
+            reset_environment();
+
+            drive_cycle(1'b1, 1'b0); // Idle -> Select-DR
+            drive_cycle(1'b0, 1'b0); // Select-DR -> Capture-DR
+            drive_cycle(1'b0, 1'b0); // Capture-DR -> Shift-DR
+            drive_cycle(1'b1, 1'b0); // Shift-DR -> Exit1-DR
+            drive_cycle(1'b0, 1'b0); // Exit1-DR -> Pause-DR
+            check(dut.u_jtag_tap.state === 4'd6, "TAP enters Pause-DR");
+            drive_cycle(1'b0, 1'b0); // Pause-DR self-loop
+            drive_cycle(1'b1, 1'b0); // Pause-DR -> Exit2-DR
+            drive_cycle(1'b0, 1'b0); // Exit2-DR -> Shift-DR
+            drive_cycle(1'b1, 1'b0); // Shift-DR -> Exit1-DR
+            drive_cycle(1'b1, 1'b0); // Exit1-DR -> Update-DR
+            drive_cycle(1'b0, 1'b0); // Update-DR -> Idle
+
+            drive_cycle(1'b1, 1'b0); // Idle -> Select-DR
+            drive_cycle(1'b1, 1'b0); // Select-DR -> Select-IR
+            drive_cycle(1'b0, 1'b0); // Select-IR -> Capture-IR
+            drive_cycle(1'b0, 1'b0); // Capture-IR -> Shift-IR
+            drive_cycle(1'b1, 1'b0); // Shift-IR -> Exit1-IR
+            drive_cycle(1'b0, 1'b0); // Exit1-IR -> Pause-IR
+            check(dut.u_jtag_tap.state === 4'd13, "TAP enters Pause-IR");
+            drive_cycle(1'b0, 1'b0); // Pause-IR self-loop
+            drive_cycle(1'b1, 1'b0); // Pause-IR -> Exit2-IR
+            drive_cycle(1'b0, 1'b0); // Exit2-IR -> Shift-IR
+            drive_cycle(1'b1, 1'b0); // Shift-IR -> Exit1-IR
+            drive_cycle(1'b1, 1'b0); // Exit1-IR -> Update-IR
+            drive_cycle(1'b0, 1'b0); // Update-IR -> Idle
+
+            reset_environment();
+        end
+    endtask
+
     initial begin : run_test
         errors = 0;
         checks = 0;
@@ -733,7 +779,9 @@ module tb_ijtag_aes_top;
 
         test_configuration_register();
         test_tap_data_registers();
-        test_aes_core_decryption();
+        test_tap_pause_and_exit_states();
+        test_aes_core_operation(1'b0);
+        test_aes_core_operation(1'b1);
 
         $display("\n[TEST 2] ALL EIGHT SIB CONFIGURATIONS");
         check_configuration(3'b000, 2'd0, 1'b0);

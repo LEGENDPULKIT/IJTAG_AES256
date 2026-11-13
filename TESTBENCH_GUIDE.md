@@ -39,7 +39,10 @@ flowchart TD
     N -- No --> O[Print totals and finish]
 ~~~
 
-The main order is in the run_test initial block. Each encryption task also makes its own checks for configuration, payload loading, and AES completion.
+The main order is in the run_test initial block. It exercises TAP pause/exit
+transitions and both AES core datapaths before running the IJTAG transactions.
+Each AES transaction checks configuration, payload loading, completion, and
+the scanned result.
 
 ## 3. Declarations: signals, counters, and data
 

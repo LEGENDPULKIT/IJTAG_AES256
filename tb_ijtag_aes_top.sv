@@ -793,4 +793,39 @@ module tb_ijtag_aes_top;
         $finish;
     end
 
+    always @(negedge clk) begin
+        if (reset_n && trst_n) begin
+            assert (dut.instrument_enable ===
+                    (sib1_enable | sib2_enable | sib3_enable))
+                else $error("[ASSERT 1] Instrument enable must reflect any open SIB");
+
+            assert (({sib3_enable,sib2_enable,sib1_enable} != 3'b000) ||
+                    (dut.instrument_enable === 1'b0))
+                else $error("[ASSERT 2] All-closed SIB configuration must disable the instrument");
+
+            assert (({sib3_enable,sib2_enable,sib1_enable} != 3'b001) ||
+                    (dut.selected_sib === 2'd1))
+                else $error("[ASSERT 3] SIB configuration 001 must select SIB1");
+
+            assert (({sib3_enable,sib2_enable,sib1_enable} != 3'b010) ||
+                    (dut.selected_sib === 2'd2))
+                else $error("[ASSERT 4] SIB configuration 010 must select SIB2");
+
+            assert (({sib3_enable,sib2_enable,sib1_enable} != 3'b100) ||
+                    (dut.selected_sib === 2'd3))
+                else $error("[ASSERT 5] SIB configuration 100 must select SIB3");
+
+            assert (({sib3_enable,sib2_enable,sib1_enable} inside
+                     {3'b011,3'b101,3'b110,3'b111}) ?
+                    (dut.selected_sib === 2'd0) : 1'b1)
+                else $error("[ASSERT 6] Multi-hot SIB configurations must decode selected_sib as zero");
+
+            assert (!(aes_busy && aes_done))
+                else $error("[ASSERT 7] AES busy and done must not be high together");
+
+            assert (aes_busy === dut.u_shared_aes_instrument.busy_reg)
+                else $error("[ASSERT 8] Top-level AES busy must match wrapper busy state");
+        end
+    end
+
 endmodule
